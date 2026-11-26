@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>FlashComm — iOS Li-Fi Transmitter</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --danger: #ef4444;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .panel {
+      width: 100%;
+      max-width: 420px;
+      background: var(--card);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+    }
+    h1 { font-size: 1.3rem; margin: 0 0 6px; }
+    p.sub { font-size: 0.85rem; color: var(--muted); margin: 0 0 18px; line-height: 1.4; }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 6px; }
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #0f172a;
+      color: var(--text);
+      font-size: 1rem;
+      margin-bottom: 14px;
+    }
+    .row { display: flex; gap: 12px; }
+    .row > div { flex: 1; }
+    button {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 12px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--accent);
+      color: #0f172a;
+      margin-top: 6px;
+    }
+    button:active { opacity: 0.85; }
+    .tip {
+      margin-top: 14px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      background: rgba(15, 23, 42, 0.6);
+      padding: 10px 12px;
+      border-radius: 10px;
+      line-height: 1.45;
+    }
+    #flashOverlay {
+      position: fixed;
+      inset: 0;
+      background: #000000;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 28px;
+      z-index: 9999;
+      touch-action: manipulation;
+    }
+    #statusBadge {
+      background: rgba(15, 23, 42, 0.78);
+      color: #f8fafc;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      margin-bottom: 12px;
+      backdrop-filter: blur(6px);
+    }
+    #cancelBtn {
+      width: auto;
+      padding: 10px 22px;
+      background: var(--danger);
+      color: #fff;
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>FlashComm Li-Fi Transmitter</h1>
+    <p class="sub">Set iPhone brightness to 100% and place the screen directly over your LDR sensor.</p>
+
+    <label for="msgInput">Phrase to Transmit</label>
+    <input type="text" id="msgInput" value="Hello from Li-Fi!" maxlength="64" placeholder="Type any phrase..." />
+
+    <div class="row">
+      <div>
+        <label for="bitMs">Bit Duration (ms)</label>
+        <input type="number" id="bitMs" value="100" min="20" max="1000" />
+      </div>
+      <div>
+        <label for="leadDelay">Start Delay (s)</label>
+        <input type="number" id="leadDelay" value="2" min="0" max="10" />
+      </div>
+    </div>
+
+    <button id="sendBtn">Transmit Phrase</button>
+
+    <div class="tip">
+      Turn off True Tone and Night Shift, set brightness to max, and keep Bit Duration at 100 ms to match the Arduino receiver.
+    </div>
+  </div>
+
+  <div id="flashOverlay">
+    <div id="statusBadge">Preparing...</div>
+    <button id="cancelBtn">Stop</button>
+  </div>
+
+  <script>
+    const sendBtn = document.getElementById("sendBtn");
+    const cancelBtn = document.getElementById("cancelBtn");
+    const overlay = document.getElementById("flashOverlay");
+    const statusBadge = document.getElementById("statusBadge");
+
+    let abortFlag = false;
+    let wakeLock = null;
+
+    async function requestWakeLock() {
+      try {
+        if ("wakeLock" in navigator) {
+          wakeLock = await navigator.wakeLock.request("screen");
+        }
+      } catch (_) {}
+    }
+
+    function releaseWakeLock() {
+      if (wakeLock) {
+        wakeLock.release().catch(() => {});
+        wakeLock = null;
+      }
+    }
+
+    function textToBits(text) {
+      const bits = [1, 0, 1, 0];
+      for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i) & 0x7f;
+        bits.push(1);
+        for (let b = 7; b >= 0; b--) {
+          bits.push((code >> b) & 1);
+        }
+        bits.push(0);
+      }
+      bits.push(0, 0);
+      return bits;
+    }
+
+    function sleepUntil(targetTime) {
+      return new Promise((resolve) => {
+        function tick() {
+          if (abortFlag || performance.now() >= targetTime) {
+            resolve();
+          } else {
+            requestAnimationFrame(tick);
+          }
+        }
+        requestAnimationFrame(tick);
+      });
+    }
+
+    async function transmit() {
+      const text = document.getElementById("msgInput").value;
+      const bitDuration = Math.max(20, Number(document.getElementById("bitMs").value) || 100);
+      const leadSec = Math.max(0, Number(document.getElementById("leadDelay").value) || 0);
+
+      if (!text) return;
+
+      abortFlag = false;
+      overlay.style.background = "#000000";
+      overlay.style.display = "flex";
+      await requestWakeLock();
+
+      for (let s = leadSec; s > 0; s--) {
+        if (abortFlag) break;
+        statusBadge.textContent = `Place screen on LDR... ${s}s`;
+        await sleepUntil(performance.now() + 1000);
+      }
+
+      const bits = textToBits(text);
+      const t0 = performance.now();
+
+      for (let i = 0; i < bits.length; i++) {
+        if (abortFlag) break;
+        overlay.style.background = bits[i] === 1 ? "#FFFFFF" : "#000000";
+        statusBadge.textContent = `Bit ${i + 1} / ${bits.length}`;
+        await sleepUntil(t0 + (i + 1) * bitDuration);
+      }
+
+      overlay.style.background = "#000000";
+      statusBadge.textContent = abortFlag ? "Stopped" : "Done";
+      await sleepUntil(performance.now() + 500);
+
+      overlay.style.display = "none";
+      releaseWakeLock();
+    }
+
+    sendBtn.addEventListener("click", transmit);
+    cancelBtn.addEventListener("click", () => {
+      abortFlag = true;
+    });
+  </script>
+</body>
+</html>
